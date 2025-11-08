@@ -1,0 +1,135 @@
+@startuml ShopLite Order Saga Sequence Diagram
+
+title ShopLite Order Saga - Event-Driven Choreography
+
+actor Customer
+participant "API Gateway" as Gateway
+participant "Orders Service" as Orders
+database "PostgreSQL" as OrdersDB
+participant "Outbox\nDispatcher" as Outbox
+participant "Kafka" as Kafka
+participant "Inventory Service" as Inventory
+database "MongoDB" as InventoryDB
+
+== Happy Path: Stock Available ==
+
+Customer -> Gateway: POST /orders\n{items: [{sku:"ABC", qty:2}]}
+activate Gateway
+Gateway -> Gateway: Validate JWT\n(issuer, aud, exp, scopes)
+Gateway -> Orders: Forward request\n+ JWT token
+activate Orders
+
+Orders -> Orders: CreateOrderUseCase.execute()
+Orders -> OrdersDB: BEGIN TRANSACTION
+OrdersDB -> OrdersDB: INSERT INTO orders\n(status='PENDING')
+OrdersDB -> OrdersDB: INSERT INTO order_items
+OrdersDB -> OrdersDB: INSERT INTO outbox\n(OrderPlaced event)
+OrdersDB -> Orders: COMMIT
+
+Orders -> Gateway: 201 {orderId, status:'PENDING'}
+Gateway -> Customer: 201 Created
+deactivate Gateway
+
+...Background Process...
+
+Outbox -> OrdersDB: SELECT * FROM outbox\nWHERE processed_at IS NULL
+OrdersDB -> Outbox: Unprocessed events
+Outbox -> Kafka: Publish OrderPlaced\n(topic: orders.placed)
+activate Kafka
+Outbox -> OrdersDB: UPDATE outbox\nSET processed_at=NOW()
+
+Kafka -> Inventory: OrderPlaced event
+deactivate Kafka
+activate Inventory
+
+Inventory -> InventoryDB: findOne({_id:'ABC'})
+InventoryDB -> Inventory: {available:10, reserved:0}
+Inventory -> Inventory: Check: available >= qty?\n(10 >= 2 = true)
+
+Inventory -> InventoryDB: updateOne({_id:'ABC'},\n{$inc: {available:-2, reserved:+2}})
+InventoryDB -> InventoryDB: Atomic update\n(available=8, reserved=2)
+
+Inventory -> Kafka: Publish StockReserved\n(topic: inventory.stock-reserved)
+activate Kafka
+Kafka -> Orders: StockReserved event
+deactivate Kafka
+deactivate Inventory
+
+activate Orders
+Orders -> Orders: ProcessStockEventUseCase\n.processStockReserved()
+Orders -> OrdersDB: UPDATE orders\nSET status='CONFIRMED'\nWHERE id=orderId
+OrdersDB -> Orders: Updated
+Orders -> Orders: Log: Order confirmed
+deactivate Orders
+
+note over Customer
+  Customer can now query
+  GET /orders/{id}
+  and see status='CONFIRMED'
+end note
+
+== Unhappy Path: Insufficient Stock ==
+
+Customer -> Gateway: POST /orders\n{items: [{sku:"XYZ", qty:100}]}
+activate Gateway
+Gateway -> Gateway: Validate JWT
+Gateway -> Orders: Forward request
+activate Orders
+
+Orders -> OrdersDB: BEGIN TRANSACTION
+OrdersDB -> OrdersDB: INSERT orders (PENDING)
+OrdersDB -> OrdersDB: INSERT outbox (OrderPlaced)
+OrdersDB -> Orders: COMMIT
+Orders -> Gateway: 201 {orderId, status:'PENDING'}
+Gateway -> Customer: 201 Created
+deactivate Gateway
+
+Outbox -> OrdersDB: Poll outbox
+Outbox -> Kafka: Publish OrderPlaced
+activate Kafka
+Kafka -> Inventory: OrderPlaced event
+deactivate Kafka
+activate Inventory
+
+Inventory -> InventoryDB: findOne({_id:'XYZ'})
+InventoryDB -> Inventory: {available:5, reserved:0}
+Inventory -> Inventory: Check: available >= qty?\n(5 >= 100 = FALSE)
+
+Inventory -> Kafka: Publish StockRejected\n(reason: INSUFFICIENT_STOCK,\ndetails: [{requested:100, available:5}])
+activate Kafka
+Kafka -> Orders: StockRejected event
+deactivate Kafka
+deactivate Inventory
+
+activate Orders
+Orders -> Orders: ProcessStockEventUseCase\n.processStockRejected()
+Orders -> OrdersDB: UPDATE orders\nSET status='CANCELLED'\nWHERE id=orderId
+OrdersDB -> Orders: Updated
+Orders -> Orders: Log: Order cancelled
+deactivate Orders
+
+note over Customer
+  Customer queries
+  GET /orders/{id}
+  and sees status='CANCELLED'
+end note
+
+== Idempotency & Reliability ==
+
+note over Orders, Inventory
+  **Idempotency**:
+  - Each event has unique event-id in headers
+  - Consumers track processed event IDs
+  - Duplicate events are ignored
+
+  **Outbox Pattern**:
+  - Events written to DB in same transaction as business data
+  - Background dispatcher publishes reliably
+  - At-least-once delivery guaranteed
+
+  **Optimistic Locking**:
+  - Orders table has 'version' field
+  - MongoDB atomic operations for stock updates
+end note
+
+@enduml

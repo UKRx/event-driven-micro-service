@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "http://shoplite.com/events/StockReserved.v1.schema.json",
+  "title": "StockReserved",
+  "description": "Event published when inventory successfully reserves stock for an order",
+  "type": "object",
+  "required": ["type", "version", "orderId", "reservations", "traceId", "correlationId", "ts"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "const": "StockReserved",
+      "description": "Event type identifier"
+    },
+    "version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Event schema version"
+    },
+    "orderId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Order identifier"
+    },
+    "reservations": {
+      "type": "array",
+      "minItems": 1,
+      "description": "List of successfully reserved items",
+      "items": {
+        "type": "object",
+        "required": ["sku", "qty"],
+        "properties": {
+          "sku": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Product SKU"
+          },
+          "qty": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Quantity reserved"
+          }
+        }
+      }
+    },
+    "traceId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Distributed tracing identifier"
+    },
+    "correlationId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Business correlation identifier"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event timestamp (ISO-8601)"
+    }
+  },
+  "additionalProperties": false
+}
